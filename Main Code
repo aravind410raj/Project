@@ -1,0 +1,290 @@
+import numpy as np
+from scipy.spatial.distance import cdist
+from math import radians, cos, sin, asin, sqrt
+import matplotlib.pyplot as plt
+from PIL import Image, UnidentifiedImageError
+import requests
+from io import BytesIO
+
+class TOPSIS:
+    def __init__(self, criterion_names, attraction_names, attraction_coordinates):
+        self.criterion_names = criterion_names
+        self.attraction_names = attraction_names
+        self.attraction_coordinates = attraction_coordinates
+        self.weights = None
+        self.evaluation_matrix = None
+        self.normalized_decision = None
+        self.weighted_normalized = None
+        self.ideal_solution = None
+        self.anti_ideal_solution = None
+        self.scores = None
+        self.ranked_attractions = None
+        self.attraction_ranks = None
+        self.attraction_links = None
+
+    def collect_user_weights(self):
+        n = len(self.criterion_names)
+        self.weights = []
+        print("Please provide the weights for each criterion using Entropy weighting:")
+        print("Scale: 1 (Very Low Importance) to 7 (Very High Importance)")
+        print("1 - Very Low Importance")
+        print("2 - Low Importance")
+        print("3 - Somewhat Low Importance")
+        print("4 - Neutral")
+        print("5 - Somewhat High Importance")
+        print("6 - High Importance")
+        print("7 - Very High Importance")
+        for criterion in self.criterion_names:
+            weight = int(input(f"Enter the importance of {criterion}: "))
+            if weight < 1 or weight > 7:
+                print("Invalid input! Please enter a weight between 1 and 7.")
+                return self.collect_user_weights()  # Prompt user to re-enter weight
+            self.weights.append(weight)
+
+        # Normalize the weights
+        sum_weights = sum(self.weights)
+        self.weights = [weight / sum_weights for weight in self.weights]
+
+        # Display the weights of each criterion rounded to 3 decimals
+        print("\nWeights of each criterion:")
+        for criterion, weight in zip(self.criterion_names, self.weights):
+            rounded_weight = round(weight, 3)
+            print(f"{criterion}: {rounded_weight}")
+
+    def calculate_entropy(self, x):
+        p = x / np.sum(x)
+        return -np.sum(p * np.log(p))
+
+    def entropy_weighting(self):
+        entropies = []
+        for column in self.evaluation_matrix.T:
+            entropies.append(self.calculate_entropy(column))
+        total_entropy = np.sum(entropies)
+
+        self.weights = [(total_entropy - entropy) / total_entropy for entropy in entropies]
+
+    def step_2(self):
+        # Normalizing the decision matrix
+        self.normalized_decision = self.evaluation_matrix / np.sqrt(np.sum(self.evaluation_matrix ** 2, axis=0))
+
+    def step_3(self):
+        # Calculating the weighted normalized decision matrix
+        self.weighted_normalized = self.normalized_decision * self.weights
+
+    def step_4(self):
+        # Calculating the ideal and anti-ideal solutions
+        self.ideal_solution = np.max(self.weighted_normalized, axis=0)
+        self.anti_ideal_solution = np.min(self.weighted_normalized, axis=0)
+
+    def step_5(self):
+        # Calculating distances to ideal and anti-ideal solutions
+        distance_to_ideal = np.sqrt(np.sum((self.weighted_normalized - self.ideal_solution) ** 2, axis=1))
+        distance_to_anti_ideal = np.sqrt(np.sum((self.weighted_normalized - self.anti_ideal_solution) ** 2, axis=1))
+
+        # Calculating the relative closeness to the ideal solution
+        self.scores = distance_to_anti_ideal / (distance_to_ideal + distance_to_anti_ideal)
+
+        # Ranking attractions based on scores
+        self.attraction_ranks = np.argsort(self.scores)[::-1]
+
+        # Assigning ranks to attractions
+        self.ranked_attractions = [self.attraction_names[i] for i in self.attraction_ranks]
+
+    def display_top_5_photos(self, attraction_descriptions):
+        for attraction in self.ranked_attractions[:5]:
+            try:
+                response = requests.get(self.attraction_links[attraction])
+                img = Image.open(BytesIO(response.content))
+                # Resize the image to a fixed dimension (e.g., 300x200)
+                img = img.resize((500, 300))
+                print(f'{attraction}: {attraction_descriptions[attraction]}')
+                display(img)
+            except (requests.RequestException, Exception) as e:
+                print(f"Error downloading image for {attraction}: {e}")
+
+def haversine(coord1, coord2):
+    R = 6371  # Earth's radius in km
+    lat1, lon1 = coord1
+    lat2, lon2 = coord2
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    return R * c
+
+def roulette_wheel_selection(p):
+    cumulative_sum = np.cumsum(p)
+    r = np.random.rand()
+    for i, sum_ in enumerate(cumulative_sum):
+        if r <= sum_:
+            return i
+    return len(p) - 1
+
+def plot_solution(tour, model):
+    plt.plot(model['coords'][tour, 0], model['coords'][tour, 1], 'k-o', linewidth=2)
+    plt.grid(True)
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.title('Optimal Tour')
+    for i, txt in enumerate(tour):
+        plt.text(model['coords'][txt, 0], model['coords'][txt, 1], model['names'][txt], verticalalignment='bottom', horizontalalignment='right')
+
+def ACO_TSP(attraction_names, attraction_coordinates):
+    coords = np.array([attraction_coordinates[name] for name in attraction_names])
+    names = [name for name in attraction_names]
+    nVar = coords.shape[0]
+    D = cdist(coords, coords, metric=lambda u, v: haversine(u, v))
+    model = {'n': nVar, 'coords': coords, 'D': D, 'names': names}
+    def cost_function(tour):
+        return sum([model['D'][tour[i], tour[i + 1]] for i in range(len(tour) - 1)])
+    MaxIt = 300
+    nAnt = 10
+    Q = 2
+    tau0 = 10 * Q / (nVar * np.mean(model['D']))
+    alpha = 2
+    beta = 1
+    rho = 0.01
+    eta = 1 / model['D']
+    tau = tau0 * np.ones((nVar, nVar))
+    best_cost = np.inf
+    best_sol = None
+    for it in range(MaxIt):
+        ant_tours = []
+        ant_costs = []
+        for k in range(nAnt):
+            tour = [0]  # Start from the first attraction
+            for _ in range(1, nVar):
+                i = tour[-1]
+                P = (tau[i, :] ** alpha) * (eta[i, :] ** beta)
+                P[tour] = 0
+                P = P / np.sum(P)
+                j = roulette_wheel_selection(P)
+                tour.append(j)
+            tour.append(0)  # End at the first attraction
+            cost = cost_function (tour)
+            if cost < best_cost:
+                best_cost = cost
+                best_sol = tour
+            ant_tours.append(tour)
+            ant_costs.append(cost)
+        for k, tour in enumerate(ant_tours):
+            for i in range(len(tour) - 1):
+                tau[tour[i], tour[i + 1]] += Q / ant_costs[k]
+        tau = (1 - rho) * tau
+        print(f'Iteration {it + 1}: Best Cost = {best_cost}')
+
+    # Plot the final optimal tour
+    plt.figure(1)
+    plot_solution(best_sol, model)
+    plt.grid(True)
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.title('Optimal Tour')
+    for i, txt in enumerate(best_sol):
+        plt.text(model['coords'][txt, 0], model['coords'][txt, 1], model['names'][txt], verticalalignment='bottom', horizontalalignment='right')
+    plt.show()
+
+    print('Your optimized itinerary is:')
+    print('Start at', names[0])
+    for i in best_sol[1:-1]:
+        print(f'Visit: {names[i]}')
+    print('Return to', names[0])
+
+def main():
+    # Define criterion names, attraction names, and attraction coordinates
+    criterion_names = ['Amenities', 'Activities', 'Budget', 'Accessibility', 'Cultural Significance']
+    attraction_names = ['Chennai Airport', 'Marina Beach', 'Kapaleeshwarar Temple', 'Fort St. George', 'San Thome Church',
+                        'Vadapalani Murugan Temple', 'Chetpet Eco Park', 'Ashtalakshmi Temple', 'Semmozhi Poonga',
+                        'Elliots Beach', 'Vivekananda House', 'Thousand Lights Mosque', 'Birla Planetarium',
+                        'Valluvar Kottam', 'Parthasarathy Temple', 'Government Museum']
+    attraction_coordinates = {'Chennai Airport': (12.9944, 80.1802),
+                              'Marina Beach': (13.0481, 80.2574), 'Kapaleeshwarar Temple': (13.0338, 80.2697),
+                              'Fort St. George': (13.0793, 80.2870), 'San Thome Church': (13.0339, 80.2895),
+                              'Vadapalani Murugan Temple': (13.0504, 80.2123), 'Chetpet Eco Park': (13.0675, 80.2434),
+                              'Ashtalakshmi Temple': (12.9925, 80.2706), 'Semmozhi Poonga': (13.0588, 80.2642),
+                              'Elliots Beach': (12.9999, 80.2715), 'Vivekananda House': (13.0295, 80.2583),
+                              'Thousand Lights Mosque': (13.0643, 80.2486), 'Birla Planetarium': (13.0113, 80.2419),
+                              'Valluvar Kottam': (13.0502, 80.2403), 'Parthasarathy Temple': (13.0339, 80.2514),
+                              'Government Museum': (13.0803, 80.2656)}
+
+    # Define attraction links
+    attraction_links = {
+        'Chennai Airport': 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Chennai_airport_view_4.jpeg/1920px-Chennai_airport_view_4.jpeg',
+        'Marina Beach': 'https://as2.ftcdn.net/v2/jpg/04/84/47/27/1000_F_484472702_acpl3SZTBwb2Al4ZiW8VusICp7Utl8ed.jpg',
+        'Kapaleeshwarar Temple': 'https://www.tamilnadutourism.tn.gov.in/img/pages/medium-desktop/kapaleeshwarar-temple-1656078500_97b56461f9ad05d3b236.jpg',
+        'Fort St. George': 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b0/Fort_St._George%2C_Chennai_2.jpg/1024px-Fort_St._George%2C_Chennai_2.jpg',
+        'San Thome Church': 'https://utsav.gov.in/public/uploads/event_cover_image/event_1018/16624957171204321487.jpeg',
+        'Vadapalani Murugan Temple': 'https://www.holidify.com/images/cmsuploads/compressed/slide_02_20180511203340.jpg',
+        'Chetpet Eco Park': 'https://media-cdn.tripadvisor.com/media/photo-s/14/f7/5e/7f/entry-to-chetpet-eco.jpg',
+        'Ashtalakshmi Temple': 'https://yometro.com/images/places/ashtalakshmi-temple.jpg',
+        'Semmozhi Poonga': 'https://assets-global.website-files.com/5f67db4a616819ac2184f8c8/5f67db4a616819d07d84f9f7_17.%20Semmozhi%20Poonga%20-%20Copy.jpg',
+        'Elliots Beach': 'https://theworldhour.com/wp-content/uploads/2020/12/Edward-Elliots-Beach-Chennai-1.jpg',
+        'Vivekananda House': 'https://www.tamilnadutourism.tn.gov.in/img/pages/large-desktop/vivekananda-house-and-museum-1657264976_17ad4f8d674288169425.webp',
+        'Thousand Lights Mosque': 'https://www.tamilnadutourism.tn.gov.in/img/pages/large-desktop/thousand-lights-mosque-1656502824_1e06a8e1640f81e02e03.webp',
+        'Birla Planetarium': 'https://static.trip101.com/main_pics/206850/medium_webp.webp',
+        'Valluvar Kottam': 'https://www.nativeplanet.com/img/2023/11/valluvar-kottam-monument-in-chennai-india_1700119898806-1200x675-20231116132601.jpg',
+        'Parthasarathy Temple': 'https://tntemplesproject.files.wordpress.com/2021/11/2021-7-25-1-gv28-1-1-parthasarathy-perumal-triplicane-chennai-42.jpg',
+        'Government Museum': 'https://yometro.com/images/places/government-museum.jpg'
+    }
+
+    # Define attraction descriptions
+    attraction_descriptions = {
+        'Chennai Airport': 'Chennai International Airport is an international airport serving the city of Chennai, Tamil Nadu, India, and its metropolitan area. It is located in Meenambakkam and Tirusulam.',
+        'Marina Beach': 'Marina Beach is a natural urban beach in Chennai, Tamil Nadu, India, along the Bay of Bengal. The beach runs from near Fort St. George in the north to Foreshore Estate in the south, a distance of 6.0 km (3.7 mi), making it the longest natural urban beach in the country.',
+        'Kapaleeshwarar Temple': 'Kapaleeshwarar Temple is a Hindu temple dedicated to Lord Shiva located in Mylapore, Chennai in the Indian state of Tamil Nadu.',
+        'Fort St. George': 'Fort St George is the first English fortress in India, founded in 1644 at the coastal city of Madras, the modern city of Chennai.',
+        'San Thome Church': 'San Thome Basilica is a Roman Catholic minor basilica in Santhome, in the city of Chennai, India. It was built in the 16th century by Portuguese explorers, over the tomb of Saint Thomas, one of the twelve apostles of Jesus.',
+        'Vadapalani Murugan Temple': 'Vadapalani Murugan Temple is a temple dedicated to Hindu god Murugan, located in Vadapalani, Chennai, Tamil Nadu, India. The temple was constructed in 1890 by the merchant community from the Nagarthar sect.',
+        'Chetpet Eco Park': 'Chetpet EcoPark is an urban park located in Chetpet, Chennai. It is one of the few ecological parks in Chennai, and the first one built after independence.',
+        'Ashtalakshmi Temple': 'Ashtalakshmi Temple is a Hindu temple located in Besant Nagar, Chennai, India. It is dedicated to the Hindu goddess Lakshmi, and her eight primary forms.',
+        'Semmozhi Poonga': 'Semmozhi Poonga is a botanical garden in Chennai set up by the horticulture department of the Government of Tamil Nadu. The garden was opened on 24 November 2010.',
+        'Elliots Beach': 'Elliot\'s Beach is located in Besant Nagar, Chennai, India. It forms the end-point of the Marina Beach shore and is named after Edward Elliot (who was once the Chief Magistrate and Superintendent of Madras during the British colonial times).',
+        'Vivekananda House': 'Vivekanandar Illam, also known as Vivekananda House, is a historical building and pilgrim center in Chennai, India.',
+        'Thousand Lights Mosque': 'The Thousand Lights Mosque is a mosque in Chennai, Tamil Nadu, India. It is one of the largest mosques in the country and is a revered place of worship for Muslims.',
+        'Birla Planetarium': 'Birla Planetarium is a large planetarium in Chennai providing a virtual tour of the night sky and holding cosmic shows on a specially perforated hemispherical aluminium inner dome.',
+        'Valluvar Kottam': 'Valluvar Kottam is a monument in Chennai, dedicated to the classical Tamil poet-philosopher Valluvar. It is located in the neighborhood of Nungambakkam.',
+        'Parthasarathy Temple': 'Parthasarathy Temple is a Hindu temple dedicated to Lord Krishna, located in Triplicane, Chennai, India. The temple is one of the 108 Divya Desams dedicated to Lord Vishnu.',
+        'Government Museum': 'The Government Museum or Madras Museum is a museum of human history and culture located in the neighbourhood of Egmore in Chennai, India. It is the second oldest museum in India.'
+    }
+
+    # Initialize TOPSIS object
+    topsis = TOPSIS(criterion_names, attraction_names, attraction_coordinates)
+    topsis.attraction_links = attraction_links  # Assign attraction links
+
+    # Collect user input for criterion weights
+    topsis.collect_user_weights()
+
+    # Define evaluation matrix for attractions
+    evaluation_matrix = [[0, 0, 0, 0, 0],
+                         [3, 4, 5, 2, 4],
+                         [4, 5, 3, 2, 4],
+                         [5, 3, 4, 2, 3],
+                         [3, 4, 5, 2, 3],
+                         [4, 2, 5, 3, 4],
+                         [3, 4, 5, 2, 3],
+                         [4, 2, 5, 3, 4],
+                         [5, 3, 4, 2, 3],
+                         [3, 4, 5, 2, 3],
+                         [4, 2, 5, 3, 4],
+                         [2, 5, 3, 4, 2],
+                         [3, 4, 2, 5, 3],
+                         [2, 3, 4, 5, 2],
+                         [4, 5, 3, 2, 4],
+                         [5, 3, 4, 2, 3]]
+
+    # Perform TOPSIS calculation
+    topsis.evaluation_matrix = np.array(evaluation_matrix, dtype=float)
+    topsis.step_2()
+    topsis.step_3()
+    topsis.step_4()
+    topsis.step_5()
+
+    # Display the top 5 attractions with their photos and descriptions
+    print("Top 5 Attractions For You Are:")
+    topsis.display_top_5_photos(attraction_descriptions)
+
+    # Call ACO_TSP function with top 5 places and coordinates
+    ACO_TSP(['Chennai Airport'] + topsis.ranked_attractions[:5] + ['Chennai Airport'], attraction_coordinates)
+
+if __name__ == "__main__":
+    main()
